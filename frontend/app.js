@@ -2,113 +2,166 @@ const express = require('express');
 const path = require('path');
 const axios = require('axios');
 const multer = require('multer');
+const FormData = require('form-data');
 
 const app = express();
 const port = 3010;
 
-// Flask backend URL
-const BACKEND_URL = "http://localhost:5000";
-const API_KEY = "my-secret-key"; // or load from env
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5000';
+const API_KEY = process.env.API_KEY || 'my-secret-key';
 
-// Set up EJS
+// ── Setup ──────────────────────────────────────────────────────────────────────
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
-
-// Static files
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Body parsing
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// File uploads
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ storage: multer.memoryStorage() });
 
-// --- Routes ---
-app.get('/', (req, res) => {
-    res.render('index', { message: null, response: null });
+// ── Pages ──────────────────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.render('index'));
+
+// ── Streaming chat proxy ───────────────────────────────────────────────────────
+app.post('/stream', async (req, res) => {
+  const { content, session_id } = req.body;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  try {
+    const flaskRes = await axios({
+      method: 'post',
+      url: `${BACKEND_URL}/chat/stream`,
+      data: { content, session_id },
+      headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/json' },
+      responseType: 'stream',
+    });
+    flaskRes.data.pipe(res);
+    flaskRes.data.on('end', () => res.end());
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ error: 'Stream failed' })}\n\n`);
+    res.end();
+  }
 });
 
+// ── Chat (non-streaming fallback) ──────────────────────────────────────────────
 app.post('/chat', async (req, res) => {
-    const content = req.body.content;
-    try {
-        const response = await axios.post(
-            `${BACKEND_URL}/chat`,
-            { content },
-            { headers: { "x-api-key": API_KEY } }
-        );
-        res.render('result', { response: response.data.response });
-    } catch (err) {
-        res.render('result', { response: 'Error contacting backend' });
-    }
+  const { content } = req.body;
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/chat`,
+      { content },
+      { headers: { 'x-api-key': API_KEY } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Error contacting backend' });
+  }
 });
 
+// ── Image generation ───────────────────────────────────────────────────────────
 app.post('/generateImage', async (req, res) => {
-    const content = req.body.content;
-    try {
-        const response = await axios.post(
-            `${BACKEND_URL}/generateImage`,
-            { content },
-            {
-                headers: {
-                    "x-api-key": API_KEY,
-                    "response-type": "base64"
-                }
-            }
-        );
-        const imgBase64 = response.data.base64;
-        res.render('result', { response: `<img src="data:image/png;base64,${imgBase64}"/>` });
-    } catch (err) {
-        res.render('result', { response: 'Error generating image' });
-    }
+  const { content } = req.body;
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/generateImage`,
+      { content },
+      { headers: { 'x-api-key': API_KEY, 'response-type': 'base64' } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: 'Error generating image' });
+  }
 });
 
+// ── RAG: text upload ───────────────────────────────────────────────────────────
 app.post('/upload_docs', async (req, res) => {
-    const texts = req.body.texts ? req.body.texts.split('\n') : [];
-    try {
-        const response = await axios.post(
-            `${BACKEND_URL}/upload_docs`,
-            { texts }
-        );
-        res.render('result', { response: response.data.message });
-    } catch (err) {
-        res.render('result', { response: 'Error uploading documents' });
-    }
+  const { texts } = req.body;
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/upload_docs`,
+      { texts },
+      { headers: { 'x-api-key': API_KEY } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'Upload failed' });
+  }
 });
-// --- Ask RAG endpoint ---
+
+// ── RAG: PDF upload ────────────────────────────────────────────────────────────
+app.post('/upload_pdf', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+  const form = new FormData();
+  form.append('file', req.file.buffer, {
+    filename: req.file.originalname,
+    contentType: req.file.mimetype,
+  });
+
+  try {
+    const response = await axios.post(`${BACKEND_URL}/upload_pdf`, form, {
+      headers: { ...form.getHeaders(), 'x-api-key': API_KEY },
+    });
+    res.json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'PDF upload failed' });
+  }
+});
+
+// ── RAG: ask ───────────────────────────────────────────────────────────────────
 app.post('/ask_rag', async (req, res) => {
-    const query = req.body.query;
-    try {
-        const response = await axios.post(
-            `${BACKEND_URL}/ask_rag`,
-            { query },
-            { headers: { "x-api-key": API_KEY } }
-        );
-        res.render('result', { response: response.data.response });
-    } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.render('result', { response: 'Error querying RAG' });
-    }
+  const { query } = req.body;
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/ask_rag`,
+      { query },
+      { headers: { 'x-api-key': API_KEY } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'RAG query failed' });
+  }
 });
 
-// --- Chat with RAG + Memory endpoint ---
-app.post('/chat_rag_memory', async (req, res) => {
-    const query = req.body.query;
-    const session_id = req.body.session_id || 'default';
-    try {
-        const response = await axios.post(
-            `${BACKEND_URL}/chat_rag_memory`,
-            { query, session_id },
-            { headers: { "x-api-key": API_KEY } }
-        );
-        res.render('result', { response: response.data.response });
-    } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.render('result', { response: 'Error in chat with RAG + memory' });
-    }
+// ── Conversation management ────────────────────────────────────────────────────
+app.get('/conversations', async (req, res) => {
+  try {
+    const response = await axios.get(`${BACKEND_URL}/conversations`, {
+      headers: { 'x-api-key': API_KEY },
+    });
+    res.json(response.data);
+  } catch (_) {
+    res.json([]);
+  }
 });
 
-// Start server
-app.listen(port, () => {
-    console.log(`Frontend running at http://localhost:${port}`);
+app.get('/conversations/:id/history', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${BACKEND_URL}/conversations/${req.params.id}`,
+      { headers: { 'x-api-key': API_KEY } }
+    );
+    res.json(response.data);
+  } catch (_) {
+    res.json({ messages: [] });
+  }
 });
+
+app.delete('/conversations/:id', async (req, res) => {
+  try {
+    const response = await axios.delete(
+      `${BACKEND_URL}/conversations/${req.params.id}`,
+      { headers: { 'x-api-key': API_KEY } }
+    );
+    res.json(response.data);
+  } catch (_) {
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────────
+app.listen(port, () => console.log(`Frontend running at http://localhost:${port}`));

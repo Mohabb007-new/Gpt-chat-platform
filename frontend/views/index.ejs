@@ -1,52 +1,377 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Flask Frontend</title>
-    <link rel="stylesheet" href="/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Chatbot</title>
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <h1>Flask Frontend</h1>
+  <div class="layout">
 
-    <!-- Chat -->
-    <form action="/chat" method="POST">
-        <h2>Chat</h2>
-        <input type="text" name="content" placeholder="Enter your question" required>
-        <button type="submit">Send</button>
-    </form>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Conversations</span>
+        <button id="newChatBtn" class="new-chat-btn" title="New conversation">+</button>
+      </div>
+      <ul id="conversationList" class="conversation-list"></ul>
+    </aside>
 
-    <!-- Generate Image -->
-    <form action="/generateImage" method="POST">
-        <h2>Generate Image</h2>
-        <input type="text" name="content" placeholder="Image prompt" required>
-        <button type="submit">Generate</button>
-    </form>
+    <!-- Main area -->
+    <main class="main">
 
-    <!-- Upload Documents -->
-    <form action="/upload_docs" method="POST">
-        <h2>Upload Documents</h2>
-        <textarea name="texts" placeholder="Enter texts, one per line" rows="4"></textarea>
-        <button type="submit">Upload</button>
-    </form>
+      <!-- Mode tabs -->
+      <nav class="tabs">
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="rag">RAG Chat</button>
+        <button class="tab" data-tab="image">Image Gen</button>
+        <button class="tab" data-tab="docs">Documents</button>
+      </nav>
 
-    <!-- Ask RAG -->
-    <form action="/ask_rag" method="POST">
-        <h2>Ask RAG</h2>
-        <input type="text" name="query" placeholder="Enter your question" required>
-        <button type="submit">Ask</button>
-    </form>
+      <!-- ── Chat tab ─────────────────────────────────────────────────────── -->
+      <section id="tab-chat" class="tab-panel active">
+        <div id="chatMessages" class="messages"></div>
+        <form id="chatForm" class="input-bar">
+          <input id="chatInput" type="text" placeholder="Type a message…" autocomplete="off" required>
+          <button type="submit">Send</button>
+        </form>
+      </section>
 
-    <!-- Chat with RAG + Memory -->
-    <form action="/chat_rag_memory" method="POST">
-        <h2>Chat with RAG + Memory</h2>
-        <input type="text" name="session_id" placeholder="Session ID (optional)">
-        <input type="text" name="query" placeholder="Enter your question" required>
-        <button type="submit">Send</button>
-    </form>
+      <!-- ── RAG Chat tab ──────────────────────────────────────────────────── -->
+      <section id="tab-rag" class="tab-panel">
+        <div id="ragMessages" class="messages"></div>
+        <form id="ragForm" class="input-bar">
+          <input id="ragInput" type="text" placeholder="Ask a question based on your documents…" autocomplete="off" required>
+          <button type="submit">Ask</button>
+        </form>
+      </section>
 
-    <% if (message) { %>
-        <p><%= message %></p>
-    <% } %>
+      <!-- ── Image tab ─────────────────────────────────────────────────────── -->
+      <section id="tab-image" class="tab-panel">
+        <div id="imageOutput" class="image-output"></div>
+        <form id="imageForm" class="input-bar">
+          <input id="imageInput" type="text" placeholder="Describe the image you want…" autocomplete="off" required>
+          <button type="submit">Generate</button>
+        </form>
+      </section>
 
+      <!-- ── Documents tab ─────────────────────────────────────────────────── -->
+      <section id="tab-docs" class="tab-panel">
+        <div class="docs-panel">
+          <div class="docs-section">
+            <h3>Upload PDF</h3>
+            <p class="docs-hint">Upload a PDF — its text will be indexed for RAG queries.</p>
+            <form id="pdfForm" enctype="multipart/form-data">
+              <label class="file-label">
+                <input type="file" id="pdfInput" name="file" accept=".pdf" required>
+                <span id="pdfFileName">Choose PDF…</span>
+              </label>
+              <button type="submit">Upload PDF</button>
+            </form>
+            <p id="pdfStatus" class="status-msg"></p>
+          </div>
+
+          <div class="docs-section">
+            <h3>Upload Text</h3>
+            <p class="docs-hint">Paste or type text — each line becomes a searchable document.</p>
+            <form id="textForm">
+              <textarea id="textInput" rows="6" placeholder="Enter text, one document per line…"></textarea>
+              <button type="submit">Upload Text</button>
+            </form>
+            <p id="textStatus" class="status-msg"></p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentSessionId = newId();
+
+function newId() {
+  return 'sess_' + Math.random().toString(36).slice(2, 10) + '_' + Date.now();
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Conversation sidebar ───────────────────────────────────────────────────────
+async function loadConversations() {
+  try {
+    const res = await fetch('/conversations');
+    const list = await res.json();
+    const ul = document.getElementById('conversationList');
+    ul.innerHTML = '';
+    list.forEach(c => {
+      const li = document.createElement('li');
+      li.className = 'conversation-item' + (c.session_id === currentSessionId ? ' active' : '');
+      li.dataset.id = c.session_id;
+      li.innerHTML = `
+        <span class="conv-preview">${escHtml(c.preview || 'New conversation')}</span>
+        <button class="conv-delete" data-id="${c.session_id}" title="Delete">×</button>
+      `;
+      li.addEventListener('click', (e) => {
+        if (e.target.classList.contains('conv-delete')) return;
+        switchConversation(c.session_id);
+      });
+      ul.appendChild(li);
+    });
+  } catch (_) {}
+}
+
+async function switchConversation(sessionId) {
+  currentSessionId = sessionId;
+  document.querySelectorAll('.conversation-item').forEach(li => {
+    li.classList.toggle('active', li.dataset.id === sessionId);
+  });
+  // Load history into chat
+  const res = await fetch(`/conversations/${sessionId}/history`);
+  const data = await res.json();
+  const container = document.getElementById('chatMessages');
+  container.innerHTML = '';
+  (data.messages || []).forEach(m => appendMessage('chatMessages', m.role, m.content));
+  scrollBottom('chatMessages');
+}
+
+document.getElementById('newChatBtn').addEventListener('click', () => {
+  currentSessionId = newId();
+  document.getElementById('chatMessages').innerHTML = '';
+  document.querySelectorAll('.conversation-item').forEach(li => li.classList.remove('active'));
+});
+
+document.getElementById('conversationList').addEventListener('click', async (e) => {
+  if (!e.target.classList.contains('conv-delete')) return;
+  const id = e.target.dataset.id;
+  await fetch(`/conversations/${id}`, { method: 'DELETE' });
+  if (id === currentSessionId) {
+    currentSessionId = newId();
+    document.getElementById('chatMessages').innerHTML = '';
+  }
+  loadConversations();
+});
+
+// ── Message rendering ─────────────────────────────────────────────────────────
+function appendMessage(containerId, role, text) {
+  const container = document.getElementById(containerId);
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  div.innerHTML = `<div class="bubble">${escHtml(text)}</div>`;
+  container.appendChild(div);
+  return div;
+}
+
+function appendStreamingMessage(containerId) {
+  const container = document.getElementById(containerId);
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.innerHTML = '<div class="bubble"><span class="cursor">▍</span></div>';
+  container.appendChild(div);
+  scrollBottom(containerId);
+  return div.querySelector('.bubble');
+}
+
+function scrollBottom(containerId) {
+  const el = document.getElementById(containerId);
+  el.scrollTop = el.scrollHeight;
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+}
+
+// ── Streaming chat ─────────────────────────────────────────────────────────────
+document.getElementById('chatForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('chatInput');
+  const content = input.value.trim();
+  if (!content) return;
+  input.value = '';
+  input.disabled = true;
+
+  appendMessage('chatMessages', 'user', content);
+  scrollBottom('chatMessages');
+
+  const bubble = appendStreamingMessage('chatMessages');
+  let fullText = '';
+
+  try {
+    const res = await fetch('/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, session_id: currentSessionId }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = JSON.parse(line.slice(6));
+        if (payload.token) {
+          fullText += payload.token;
+          bubble.innerHTML = escHtml(fullText) + '<span class="cursor">▍</span>';
+          scrollBottom('chatMessages');
+        }
+        if (payload.done) {
+          bubble.innerHTML = escHtml(fullText);
+          loadConversations();
+        }
+      }
+    }
+  } catch (err) {
+    bubble.textContent = 'Error: could not reach the server.';
+  }
+
+  input.disabled = false;
+  input.focus();
+});
+
+// ── RAG chat ──────────────────────────────────────────────────────────────────
+document.getElementById('ragForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('ragInput');
+  const query = input.value.trim();
+  if (!query) return;
+  input.value = '';
+  input.disabled = true;
+
+  appendMessage('ragMessages', 'user', query);
+  scrollBottom('ragMessages');
+  const thinkingDiv = appendMessage('ragMessages', 'assistant', '…');
+  scrollBottom('ragMessages');
+
+  try {
+    const res = await fetch('/ask_rag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const data = await res.json();
+    thinkingDiv.querySelector('.bubble').innerHTML = escHtml(data.response || data.error || 'No response.');
+  } catch (_) {
+    thinkingDiv.querySelector('.bubble').textContent = 'Error: could not reach the server.';
+  }
+
+  scrollBottom('ragMessages');
+  input.disabled = false;
+  input.focus();
+});
+
+// ── Image generation ──────────────────────────────────────────────────────────
+document.getElementById('imageForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('imageInput');
+  const content = input.value.trim();
+  if (!content) return;
+  input.disabled = true;
+
+  const output = document.getElementById('imageOutput');
+  output.innerHTML = '<p class="generating">Generating…</p>';
+
+  try {
+    const res = await fetch('/generateImage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const data = await res.json();
+    if (data.base64) {
+      output.innerHTML = `
+        <p class="image-prompt">${escHtml(content)}</p>
+        <img src="data:image/png;base64,${data.base64}" alt="Generated image">
+      `;
+    } else {
+      output.innerHTML = `<p class="error">${escHtml(data.error || 'Generation failed.')}</p>`;
+    }
+  } catch (_) {
+    output.innerHTML = '<p class="error">Error: could not reach the server.</p>';
+  }
+
+  input.disabled = false;
+});
+
+// ── PDF upload ────────────────────────────────────────────────────────────────
+document.getElementById('pdfInput').addEventListener('change', (e) => {
+  const name = e.target.files[0]?.name || 'Choose PDF…';
+  document.getElementById('pdfFileName').textContent = name;
+});
+
+document.getElementById('pdfForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fileInput = document.getElementById('pdfInput');
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+
+  const status = document.getElementById('pdfStatus');
+  status.textContent = 'Uploading…';
+  status.className = 'status-msg';
+
+  try {
+    const res = await fetch('/upload_pdf', { method: 'POST', body: formData });
+    const data = await res.json();
+    status.textContent = data.message || data.error;
+    status.className = 'status-msg ' + (res.ok ? 'ok' : 'err');
+  } catch (_) {
+    status.textContent = 'Upload failed.';
+    status.className = 'status-msg err';
+  }
+
+  fileInput.value = '';
+  document.getElementById('pdfFileName').textContent = 'Choose PDF…';
+});
+
+// ── Text upload ───────────────────────────────────────────────────────────────
+document.getElementById('textForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const textarea = document.getElementById('textInput');
+  const texts = textarea.value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!texts.length) return;
+
+  const status = document.getElementById('textStatus');
+  status.textContent = 'Uploading…';
+  status.className = 'status-msg';
+
+  try {
+    const res = await fetch('/upload_docs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts }),
+    });
+    const data = await res.json();
+    status.textContent = data.message || data.error;
+    status.className = 'status-msg ' + (res.ok ? 'ok' : 'err');
+    if (res.ok) textarea.value = '';
+  } catch (_) {
+    status.textContent = 'Upload failed.';
+    status.className = 'status-msg err';
+  }
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadConversations();
+</script>
 </body>
 </html>
